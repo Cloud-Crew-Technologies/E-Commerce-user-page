@@ -1,0 +1,656 @@
+import React, { useEffect, useState } from "react";
+import {
+  Container,
+  Typography,
+  Button,
+  Box,
+  Paper,
+  Grid,
+  Divider,
+  Card,
+  CardContent,
+  Avatar,
+  Rating,
+  Chip,
+  useTheme,
+  useMediaQuery,
+  Fade,
+  Alert,
+} from "@mui/material";
+import { useNavigate } from "react-router-dom";
+import {
+  Security,
+  LocalShipping,
+  Support,
+  VerifiedUser,
+  Star,
+  Payment,
+  Lock,
+  Shield,
+} from "@mui/icons-material";
+import axios from "axios";
+
+export default function Checkout() {
+  const [total, setTotal] = useState(0);
+  const [cart, setCart] = useState([]);
+  const [products, setProduct] = useState([]);
+  const [loading, setIsLoading] = useState(true);
+  const [paymentLoading, setPaymentLoading] = useState(false);
+  const navigate = useNavigate();
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down("md"));
+  const isSmallMobile = useMediaQuery(theme.breakpoints.down("sm"));
+
+  useEffect(() => {
+    // Update document title for SEO
+    document.title = "Secure Checkout - Complete Your Purchase | ShopEase";
+
+    const cartData = JSON.parse(localStorage.getItem("cart")) || [];
+    setCart(cartData);
+    const totalAmount = cartData.reduce(
+      (sum, item) => sum + item.price * item.quantity,
+      0
+    );
+    setTotal(totalAmount);
+    console.log("Cart:", cartData);
+    console.log("Total:", totalAmount);
+  }, []);
+
+  useEffect(() => {
+    fetchCategories();
+  }, []);
+
+  const fetchCategories = async () => {
+    try {
+      setIsLoading(true);
+      const response = await axios.get(
+        "http://localhost:3000/api/products/get"
+      );
+
+      // Ensure we set an array - handle different response structures
+      const categoryData = response.data;
+      if (Array.isArray(categoryData)) {
+        setProduct(categoryData);
+      } else if (categoryData && Array.isArray(categoryData.data)) {
+        setProduct(categoryData.data);
+      } else {
+        console.warn("Unexpected response structure:", categoryData);
+        setProduct([]);
+      }
+    } catch (error) {
+      console.error("Error fetching Products:", error);
+      setProduct([]);
+      // Note: toast is not imported, using console.error instead
+      console.error("Failed to load Products");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const loadRazorpay = () => {
+    return new Promise((resolve) => {
+      const script = document.createElement("script");
+      script.src = "https://checkout.razorpay.com/v1/checkout.js";
+      script.onload = () => resolve(true);
+      script.onerror = () => resolve(false);
+      document.body.appendChild(script);
+    });
+  };
+
+  const updateProductQuantities = async (cartItems) => {
+    try {
+      // Update each product's quantity
+      const updatePromises = cartItems.map(async (item) => {
+        // Find the current product to get its current quantity
+        const currentProduct = products.find(
+          (p) => p._id === item.productId || p._id === item._id
+        );
+        if (currentProduct) {
+          const newQuantity = currentProduct.quantity - item.quantity;
+          const productId = item._id;
+          return axios.put(
+            `http://localhost:3000/api/products/no/put/${productId}`,
+            { quantity: newQuantity }
+          );
+        }
+      });
+
+      await Promise.all(updatePromises);
+      console.log("All product quantities updated successfully");
+    } catch (error) {
+      console.error("Error updating product quantities:", error);
+      throw error;
+    }
+  };
+
+  const createOrder = async (orderData) => {
+    try {
+      // First, update product quantities before creating the order
+      await updateProductQuantities(cart);
+
+      // Transform cart items to match the Order schema
+      const formattedItems = cart.map((item) => ({
+        productId: item._id, // Handle both cases
+        quantity: item.quantity,
+        price: item.price,
+        name: item.title || item.name, // Handle both title and name
+      }));
+
+      const orderPayload = {
+        items: formattedItems,
+        total: orderData.total,
+        customerName: orderData.customerName,
+        status: "pending",
+      };
+
+      const response = await axios.post(
+        "http://localhost:3000/api/orders/create",
+        orderPayload
+      );
+
+      console.log("Order created successfully:", response.data);
+      return response.data;
+    } catch (error) {
+      console.error("Error creating order:", error);
+      throw error;
+    }
+  };
+
+  const handlePayment = async () => {
+    if (cart.length === 0) {
+      alert("Your cart is empty!");
+      return;
+    }
+
+    setPaymentLoading(true);
+
+    try {
+      // Load Razorpay SDK
+      const res = await loadRazorpay();
+      if (!res) {
+        alert("Razorpay SDK failed to load");
+        setPaymentLoading(false);
+        return;
+      }
+
+      // Create order in database (this will also update product quantities)
+      const orderData = {
+        total: finalTotal,
+        customerName: "John Doe", // You might want to get this from user input
+      };
+
+      const createdOrder = await createOrder(orderData);
+
+      const options = {
+        key: "rzp_test_4Myb0VkTb6u2Db", // Replace with your actual test key
+        amount: Math.round(finalTotal * 100), // Amount in paise
+        currency: "INR",
+        name: "ShopEase",
+        description: "Order Payment",
+        order_id: createdOrder.razorpayOrderId, // If you're creating Razorpay orders on backend
+        handler: async function (response) {
+          try {
+            // Clear cart after successful payment
+            localStorage.removeItem("cart");
+
+            // Dispatch custom event to update cart badge
+            window.dispatchEvent(new Event("cartUpdated"));
+
+            alert(`Payment successful: ${response.razorpay_payment_id}`);
+            navigate("/payment-success");
+          } catch (error) {
+            console.error("Error processing post-payment actions:", error);
+            alert(
+              "Payment successful but there was an error clearing the cart. Please contact support."
+            );
+          }
+        },
+        prefill: {
+          name: "John Doe",
+          email: "john@example.com",
+          contact: "9999999999",
+        },
+        theme: { color: "#2563eb" },
+        modal: {
+          ondismiss: function () {
+            setPaymentLoading(false);
+          },
+        },
+      };
+
+      const rzp = new window.Razorpay(options);
+      rzp.open();
+    } catch (error) {
+      console.error("Error initiating payment:", error);
+      alert("Error initiating payment. Please try again.");
+      setPaymentLoading(false);
+    }
+  };
+
+  const subtotal = total;
+  const shipping = 0; // Free shipping
+  const tax = total * 0.18; // 18% tax
+  const finalTotal = subtotal + shipping + tax;
+
+  const testimonials = [
+    {
+      name: "Alex Thompson",
+      rating: 5,
+      comment:
+        "Smooth checkout process and secure payment. Highly recommended!",
+      avatar: "AT",
+    },
+    {
+      name: "Maria Garcia",
+      rating: 5,
+      comment: "Fast and secure checkout. My payment was processed instantly.",
+      avatar: "MG",
+    },
+  ];
+
+  const securityFeatures = [
+    {
+      icon: (
+        <Lock sx={{ fontSize: { xs: 20, sm: 69 }, color: "success.main" }} />
+      ),
+      title: "SSL Encrypted",
+      description: "Your data is protected with bank-level encryption",
+    },
+    {
+      icon: (
+        <Shield sx={{ fontSize: { xs: 20, sm: 69 }, color: "primary.main" }} />
+      ),
+      title: "PCI Compliant",
+      description: "We meet the highest security standards",
+    },
+    {
+      icon: (
+        <VerifiedUser
+          sx={{ fontSize: { xs: 20, sm: 69 }, color: "secondary.main" }}
+        />
+      ),
+      title: "Verified Payment",
+      description: "All transactions are verified and secure",
+    },
+  ];
+
+  if (loading) {
+    return (
+      <Container maxWidth="xl">
+        <Box sx={{ py: 4, textAlign: "center" }}>
+          <Typography>Loading...</Typography>
+        </Box>
+      </Container>
+    );
+  }
+
+  if (cart.length === 0) {
+    return (
+      <Container maxWidth="xl">
+        <Box sx={{ py: 4, textAlign: "center" }}>
+          <Typography variant="h4" sx={{ mb: 2 }}>
+            Your cart is empty
+          </Typography>
+          <Button variant="contained" onClick={() => navigate("/products")}>
+            Continue Shopping
+          </Button>
+        </Box>
+      </Container>
+    );
+  }
+
+  return (
+    <Box sx={{ py: { xs: 3, sm: 4, md: 6 }, minHeight: "100vh" }}>
+      <Container maxWidth="xl">
+        <Typography
+          variant="h2"
+          sx={{
+            mb: { xs: 3, sm: 4, md: 5 },
+            fontWeight: 700,
+            fontSize: { xs: "1.75rem", sm: "2rem", md: "2.5rem" },
+          }}
+        >
+          Secure Checkout
+        </Typography>
+
+        <Grid container spacing={{ xs: 2, sm: 3, md: 4 }}>
+          {/* Order Summary */}
+          <Grid item xs={12} lg={8} sx={{ width: { xs: "100%", sm: "60%" } }}>
+            <Paper
+              sx={{
+                p: { xs: 2, sm: 3, md: 4 },
+                mb: { xs: 3, sm: 4 },
+                borderRadius: 3,
+              }}
+            >
+              <Typography
+                variant="h5"
+                sx={{
+                  mb: { xs: 2, sm: 3 },
+                  fontWeight: 600,
+                  fontSize: { xs: "1.25rem", sm: "1.5rem" },
+                }}
+              >
+                Order Summary
+              </Typography>
+
+              {cart.map((item, index) => (
+                <Fade
+                  in={true}
+                  key={item._id || item.id}
+                  style={{ transitionDelay: `${index * 100}ms` }}
+                >
+                  <Box
+                    sx={{
+                      display: "flex",
+                      alignItems: "center",
+                      mb: { xs: 2, sm: 2 },
+                      p: { xs: 1.5, sm: 2 },
+                      backgroundColor: "grey.50",
+                      borderRadius: 2,
+                    }}
+                  >
+                    <Box
+                      component="img"
+                      src={item.imageUrl}
+                      alt={item.title}
+                      sx={{
+                        width: { xs: 50, sm: 60 },
+                        height: { xs: 50, sm: 60 },
+                        objectFit: "cover",
+                        borderRadius: 1,
+                        mr: { xs: 1.5, sm: 2 },
+                      }}
+                    />
+                    <Box sx={{ flex: 1 }}>
+                      <Typography
+                        variant="subtitle1"
+                        sx={{
+                          fontWeight: 600,
+                          fontSize: { xs: "0.875rem", sm: "1rem" },
+                        }}
+                      >
+                        {item.title || item.name}
+                      </Typography>
+                      <Typography
+                        variant="body2"
+                        color="text.secondary"
+                        sx={{ fontSize: { xs: "0.75rem", sm: "0.875rem" } }}
+                      >
+                        Quantity: {item.quantity} × ₹{item.price}
+                      </Typography>
+                    </Box>
+                    <Typography
+                      variant="h6"
+                      color="primary"
+                      sx={{
+                        fontWeight: 600,
+                        fontSize: { xs: "1rem", sm: "1.125rem" },
+                      }}
+                    >
+                      ₹{(item.price * item.quantity).toFixed(2)}
+                    </Typography>
+                  </Box>
+                </Fade>
+              ))}
+
+              <Divider sx={{ my: { xs: 2, sm: 3 } }} />
+
+              <Box sx={{ mb: { xs: 2, sm: 3 } }}>
+                <Box
+                  sx={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    mb: 2,
+                  }}
+                >
+                  <Typography
+                    color="text.secondary"
+                    sx={{ fontSize: { xs: "0.875rem", sm: "1rem" } }}
+                  >
+                    Subtotal ({cart.length} items)
+                  </Typography>
+                  <Typography sx={{ fontSize: { xs: "0.875rem", sm: "1rem" } }}>
+                    ₹{subtotal.toFixed(2)}
+                  </Typography>
+                </Box>
+                <Box
+                  sx={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    mb: 2,
+                  }}
+                >
+                  <Typography
+                    color="text.secondary"
+                    sx={{ fontSize: { xs: "0.875rem", sm: "1rem" } }}
+                  >
+                    Shipping
+                  </Typography>
+                  <Typography
+                    color="success.main"
+                    sx={{
+                      fontWeight: 600,
+                      fontSize: { xs: "0.875rem", sm: "1rem" },
+                    }}
+                  >
+                    Free
+                  </Typography>
+                </Box>
+                <Box
+                  sx={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    mb: 2,
+                  }}
+                >
+                  <Typography
+                    color="text.secondary"
+                    sx={{ fontSize: { xs: "0.875rem", sm: "1rem" } }}
+                  >
+                    Tax (18%)
+                  </Typography>
+                  <Typography sx={{ fontSize: { xs: "0.875rem", sm: "1rem" } }}>
+                    ₹{tax.toFixed(2)}
+                  </Typography>
+                </Box>
+
+                <Divider sx={{ my: 2 }} />
+
+                <Box sx={{ display: "flex", justifyContent: "space-between" }}>
+                  <Typography
+                    variant="h5"
+                    sx={{
+                      fontWeight: 600,
+                      fontSize: { xs: "1.25rem", sm: "1.5rem" },
+                    }}
+                  >
+                    Total
+                  </Typography>
+                  <Typography
+                    variant="h5"
+                    color="primary"
+                    sx={{
+                      fontWeight: 700,
+                      fontSize: { xs: "1.25rem", sm: "1.5rem" },
+                    }}
+                  >
+                    ₹{finalTotal.toFixed(2)}
+                  </Typography>
+                </Box>
+              </Box>
+            </Paper>
+          </Grid>
+
+          {/* Payment Section */}
+          <Grid item xs={12} lg={4}>
+            <Paper
+              sx={{
+                p: { xs: 2, sm: 3, md: 4 },
+                borderRadius: 3,
+                top: 24,
+                background: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+                color: "white",
+              }}
+            >
+              <Typography
+                variant="h5"
+                sx={{
+                  mb: { xs: 2, sm: 3 },
+                  fontWeight: 600,
+                  fontSize: { xs: "1.25rem", sm: "1.5rem" },
+                }}
+              >
+                Complete Your Order
+              </Typography>
+
+              <Box sx={{ mb: { xs: 3, sm: 4 } }}>
+                <Typography
+                  variant="h4"
+                  sx={{
+                    fontWeight: 700,
+                    mb: 1,
+                    fontSize: { xs: "1.75rem", sm: "2rem", md: "2.25rem" },
+                  }}
+                >
+                  ₹{finalTotal.toFixed(2)}
+                </Typography>
+                <Typography
+                  variant="body2"
+                  sx={{
+                    opacity: 0.9,
+                    fontSize: { xs: "0.75rem", sm: "0.875rem" },
+                  }}
+                >
+                  Total amount to be paid
+                </Typography>
+              </Box>
+
+              <Button
+                variant="contained"
+                fullWidth
+                size="large"
+                onClick={handlePayment}
+                disabled={paymentLoading || cart.length === 0}
+                sx={{
+                  py: { xs: 1.5, sm: 2 },
+                  fontSize: { xs: "1rem", sm: "1.1rem" },
+                  fontWeight: 600,
+                  mb: { xs: 2, sm: 3 },
+                  backgroundColor: "secondary.main",
+                  color: "white",
+                  "&:hover": {
+                    backgroundColor: "secondary.dark",
+                    transform: "translateY(-2px)",
+                    boxShadow: "0 6px 20px rgba(245, 158, 11, 0.3)",
+                  },
+                  "&:disabled": {
+                    backgroundColor: "rgba(255,255,255,0.3)",
+                    color: "rgba(255,255,255,0.7)",
+                  },
+                }}
+                startIcon={<Payment />}
+              >
+                {paymentLoading
+                  ? "Processing..."
+                  : "Pay Securely with Razorpay"}
+              </Button>
+
+              {/* Trust Badges */}
+              <Box sx={{ textAlign: "center", mt: { xs: 3, sm: 4 } }}>
+                <Typography
+                  variant="body2"
+                  sx={{
+                    mb: 2,
+                    opacity: 0.9,
+                    fontSize: { xs: "0.75rem", sm: "0.875rem" },
+                  }}
+                >
+                  Secure Payment Gateway
+                </Typography>
+                <Box
+                  sx={{
+                    display: "flex",
+                    justifyContent: "center",
+                    gap: 2,
+                    mb: 2,
+                  }}
+                >
+                  <Security
+                    sx={{ fontSize: { xs: 20, sm: 24 }, opacity: 0.8 }}
+                  />
+                  <LocalShipping
+                    sx={{ fontSize: { xs: 20, sm: 24 }, opacity: 0.8 }}
+                  />
+                  <Support
+                    sx={{ fontSize: { xs: 20, sm: 24 }, opacity: 0.8 }}
+                  />
+                </Box>
+                <Typography
+                  variant="caption"
+                  sx={{
+                    opacity: 0.7,
+                    fontSize: { xs: "0.625rem", sm: "0.75rem" },
+                  }}
+                >
+                  Your payment information is encrypted and secure
+                </Typography>
+              </Box>
+            </Paper>
+          </Grid>
+        </Grid>
+
+        {/* Security Features */}
+        <Paper
+          sx={{
+            p: { xs: 2, sm: 3, md: 4 },
+            mb: { xs: 3, sm: 4 },
+            borderRadius: 3,
+          }}
+        >
+          <Typography
+            variant="h5"
+            sx={{
+              mb: { xs: 2, sm: 4 },
+              textAlign: "center",
+              fontWeight: 600,
+              fontSize: { xs: "1.25rem", sm: "1.5rem" },
+            }}
+          >
+            Security & Trust
+          </Typography>
+          <Grid
+            container
+            spacing={{ xs: 2, sm: 4 }}
+            sx={{ textAlign: "center", width: "100%" }}
+          >
+            {securityFeatures.map((feature, index) => (
+              <Grid item xs={12} sm={4} key={index}>
+                <Box sx={{ textAlign: "center" }}>
+                  <Box sx={{ mb: { xs: 1, sm: 2 } }}>{feature.icon}</Box>
+                  <Typography
+                    variant="subtitle1"
+                    sx={{
+                      fontWeight: 600,
+                      mb: 1,
+                      fontSize: { xs: "1.125rem", sm: "1.25rem" },
+                    }}
+                  >
+                    {feature.title}
+                  </Typography>
+                  <Typography
+                    variant="body2"
+                    color="text.secondary"
+                    sx={{ fontSize: { xs: "0.875rem", sm: "1rem" } }}
+                  >
+                    {feature.description}
+                  </Typography>
+                </Box>
+              </Grid>
+            ))}
+          </Grid>
+        </Paper>
+      </Container>
+    </Box>
+  );
+}
